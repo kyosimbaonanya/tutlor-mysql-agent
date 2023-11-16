@@ -132,6 +132,7 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 		return err
 	}
 	start := time.Now()
+
 	rows, err := db.Query(req.Code); if err != nil {
 		a.badRequest(w, err)
 		return nil
@@ -176,6 +177,10 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
         for idx, column := range columnNames {
             var scanner = columns[idx].(*CustomScanner)
             log.Println(column, ":", scanner.value)
+			if !scanner.valid {
+				a.badRequest(w, errors.New("Failed to scan column " + column + " of type " + scanner.columnType + " with value " + string(scanner.getBytes(scanner.value)) + " to interface{}"))
+				return nil
+			}
 			row[column] = scanner.value
         }
 		results = append(results, row)
@@ -285,8 +290,18 @@ func (scanner *CustomScanner) Scan(src interface{}) error {
 		value := scanner.getBytes(src)
 		scanner.valid = true
 		switch scanner.columnType {
-		case "VARCHAR", "TEXT", "CHAR", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT":
+		case "VARCHAR", "TEXT", "CHAR", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM":
 			scanner.value = string(value)
+		case "UNSIGNED BIGINT", "UNSIGNED INT", "UNSIGNED TINYINT", "UNSIGNED SMALLINT", "UNSIGNED MEDIUMINT":
+			if len(value) == 0 {
+				scanner.value = 0
+			} else {
+				num, err := strconv.Atoi(string(value))
+				if err != nil {
+					return err
+				}
+				scanner.value = num
+			}
 		case "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT":
 			if len(value) == 0 {
 				scanner.value = 0
@@ -338,10 +353,13 @@ func (scanner *CustomScanner) Scan(src interface{}) error {
 				}
 				scanner.value = b
 			}
-		case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB":
+		case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY":
 			scanner.value = value
+			// "GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION":
 		default:
+			//FIXME TEMPORARY mark unknown as invalid
 			scanner.value = value
+			scanner.valid = false
 		}
 	case nil:
 		scanner.value, scanner.valid = nil, true
