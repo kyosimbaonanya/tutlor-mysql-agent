@@ -5,12 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"sync"
+	"strconv"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -40,11 +39,16 @@ type (
 	APIClientResponse struct {
 		Message      string `json:"message"`
 		Columns 	 []string `json:"columns"`
-		Types		 []*sql.ColumnType
+		Types		 map[string]string `json:"types"`
 		Results      []map[string]interface{} `json:"results"`
 		ExecDuration int64  `json:"exec_duration"`
 		MemUsage     int64  `json:"mem_usage"`
 
+	}
+	CustomScanner struct {
+		columnType string
+		valid bool
+		value interface{}
 	}
 )
 
@@ -135,7 +139,7 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 	defer rows.Close()
 	elapsed := time.Since(start)
 
-	columns, err := rows.Columns(); if err != nil {
+	columnNames, err := rows.Columns(); if err != nil {
 		a.badRequest(w, err)
 		return nil
 	}
@@ -145,52 +149,37 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 		return nil
 	}
 
-	// columnTypes.Each(func(ct *sql.ColumnType) error {
-	// 	ct.ScanType()
-	// })
-	log.Println("column types", columnTypes)
+	columnTypeMap := make(map[string]string)
+	for i, name := range columnNames {
+		dataType := columnTypes[i].DatabaseTypeName()
+		columnTypeMap[name] = dataType
+	}
 
-	numCols := len(columns)
-	log.Println("numCols", numCols)
+
+	numCols := len(columnNames)
+	log.Printf("result has %d columns\n", numCols)
 	var results []map[string]interface{}
-	// if(numCols > 0) {
-	// 	for rows.Next() {
-	// 		values := make([]interface{}, numCols)
-	// 		valuePointers := make([]interface{}, numCols)
-	// 		for i := range values {
-	// 			valuePointers[i] = &values[i]
-	// 		}
-	// 		err := rows.Scan(valuePointers...)
-	// 		if err != nil {
-	// 			a.badRequest(w, err)
-	// 			return nil
-	// 		}
-	// 		row := make(map[string]interface{})
-	// 		for i, column := range columns {
-	// 			val := valuePointers[i].(*interface{})
-	// 			row[column] = *val
-	// 		}
-	// 		log.Println("row", row)
-	// 		results = append(results, row)
-	// 	}
-	// }
-
-	// create a fieldbinding object.
-	fb := NewFieldBinding()
-
-	fb.PutFields(columns)
-
-	//
-	outArr := []interface{}{}
-
 	for rows.Next() {
-		if err := rows.Scan(fb.GetFieldPtrArr()...); err != nil {
-			a.badRequest(w, err)
+		columns := make([]interface{}, len(columnNames))
+		for idx := range columnNames {
+            columns[idx] = new(CustomScanner)
+			columns[idx].(*CustomScanner).columnType = columnTypes[idx].DatabaseTypeName()
+        }
+		
+		err := rows.Scan(columns...)
+        if err != nil {
+            a.badRequest(w, err)
 			return nil
-		}
+        }
 
-		fmt.Printf("Row: %v", fb.Get("id"))
-		outArr = append(outArr, fb.GetFieldArr())
+		row := make(map[string]interface{})
+        for idx, column := range columnNames {
+            var scanner = columns[idx].(*CustomScanner)
+            log.Println(column, ":", scanner.value)
+			row[column] = scanner.value
+        }
+		results = append(results, row)
+
 	}
 
 	if err := rows.Err(); err != nil {
@@ -200,8 +189,8 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 	
 	WriteJSON(w, http.StatusOK, APIClientResponse{
 			Message: "Success",
-			Columns: columns,
-			Types: columnTypes,
+			Columns: columnNames,
+			Types: columnTypeMap,
 			Results: results,
 			ExecDuration: elapsed.Milliseconds(),
 	})
@@ -230,7 +219,7 @@ func (a *Agent) runRawCode(w http.ResponseWriter, req *RunCodeRequest) error {
 
 	start := time.Now()
 	var compileStdOut, compileStdErr bytes.Buffer
-	compileCmd := exec.Command("mysql", req.Database, "<", "./tmp/"+req.ID)
+	compileCmd := exec.Command("mysql", req.Database, "--disable-auto-rehash",  "-e", "source ./tmp/"+req.ID)
 	compileCmd.Stdout = &compileStdOut
 	compileCmd.Stderr = &compileStdErr
 	err = compileCmd.Run()
@@ -282,60 +271,81 @@ func supportedMethod(m string, s string) error {
 }
 // --- untils end ---
 
-
-// NewFieldBinding ...
-func NewFieldBinding() *FieldBinding {
-	return &FieldBinding{}
+// --- any custom scanner ---
+func (scanner *CustomScanner) getBytes(src interface{}) []byte {
+    if a, ok := src.([]uint8); ok {
+        return a
+    }
+    return nil
 }
 
-// FieldBinding is deisgned for SQL rows.Scan() query.
-type FieldBinding struct {
-	sync.RWMutex // embedded.  see http://golang.org/ref/spec#Struct_types
-	FieldArr     []interface{}
-	FieldPtrArr  []interface{}
-	FieldCount   int64
-	MapFieldToID map[string]int64
-}
-
-func (fb *FieldBinding) put(k string, v int64) {
-	fb.Lock()
-	defer fb.Unlock()
-	fb.MapFieldToID[k] = v
-}
-
-// Get ...
-func (fb *FieldBinding) Get(k string) interface{} {
-	fb.RLock()
-	defer fb.RUnlock()
-	// TODO: check map key exist and fb.FieldArr boundary.
-	return fb.FieldArr[fb.MapFieldToID[k]]
-}
-
-// PutFields ...
-func (fb *FieldBinding) PutFields(fArr []string) {
-	fCount := len(fArr)
-	fb.FieldArr = make([]interface{}, fCount)
-	fb.FieldPtrArr = make([]interface{}, fCount)
-	fb.MapFieldToID = make(map[string]int64, fCount)
-
-	for k, v := range fArr {
-		fb.FieldPtrArr[k] = &fb.FieldArr[k]
-		fb.put(v, int64(k))
+func (scanner *CustomScanner) Scan(src interface{}) error {
+	switch src.(type) {
+	case []byte:
+		value := scanner.getBytes(src)
+		scanner.valid = true
+		switch scanner.columnType {
+		case "VARCHAR", "TEXT", "CHAR", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT":
+			scanner.value = string(value)
+		case "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT":
+			if len(value) == 0 {
+				scanner.value = 0
+			} else {
+				num, err := strconv.Atoi(string(value))
+				if err != nil {
+					return err
+				}
+				scanner.value = num
+			}
+		case "FLOAT", "DOUBLE", "DECIMAL":
+			if len(value) == 0 {
+				scanner.value = 0.0
+			} else {
+				num, err := strconv.ParseFloat(string(value), 64)
+				if err != nil {
+					return err
+				}
+				scanner.value = num
+			}
+		case "DATE", "TIME", "YEAR", "DATETIME", "TIMESTAMP":
+			if len(value) == 0 {
+				scanner.value = time.Time{}
+			} else {
+				t, err := time.Parse("2006-01-02 15:04:05", string(value))
+				if err != nil {
+					return err
+				}
+				scanner.value = t
+			}
+		case "JSON":
+			scanner.value = string(value)
+		case "BIT" :
+			if len(value) == 0 {
+				scanner.value = false
+			}
+			if value[0] == 1 {
+				scanner.value = true
+			} else {
+				scanner.value = false
+			}
+		case "BOOL", "BOOLEAN":
+			if len(value) == 0 {
+				scanner.value = false
+			} else {
+				b, err := strconv.ParseBool(string(value))
+				if err != nil {
+					return err
+				}
+				scanner.value = b
+			}
+		case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB":
+			scanner.value = value
+		default:
+			scanner.value = value
+		}
+	case nil:
+		scanner.value, scanner.valid = nil, true
 	}
-}
 
-// GetFieldPtrArr ...
-func (fb *FieldBinding) GetFieldPtrArr() []interface{} {
-	return fb.FieldPtrArr
-}
-
-// GetFieldArr ...
-func (fb *FieldBinding) GetFieldArr() map[string]interface{} {
-	m := make(map[string]interface{}, fb.FieldCount)
-
-	for k, v := range fb.MapFieldToID {
-		m[k] = fb.FieldArr[v]
-	}
-
-	return m
+	return nil
 }
