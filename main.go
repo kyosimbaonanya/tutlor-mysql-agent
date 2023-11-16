@@ -176,7 +176,7 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 		row := make(map[string]interface{})
         for idx, column := range columnNames {
             var scanner = columns[idx].(*CustomScanner)
-            log.Println(column, ":", scanner.value)
+            // log.Println(column, ":", scanner.value)
 			if !scanner.valid {
 				a.badRequest(w, errors.New("Failed to scan column " + column + " of type " + scanner.columnType + " with value " + string(scanner.getBytes(scanner.value)) + " to interface{}"))
 				return nil
@@ -199,6 +199,7 @@ func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error
 			Results: results,
 			ExecDuration: elapsed.Milliseconds(),
 	})
+	log.Printf("done with db connection")
 	
 	return nil;
 }
