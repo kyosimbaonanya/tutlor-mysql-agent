@@ -124,7 +124,7 @@ type ARow struct{
 
 func (a *Agent) runUsingDriver(w http.ResponseWriter, req *RunCodeRequest) error {
 	log.Printf("opening db connection")
-	db, err := sql.Open("mysql", a.dbusername+":"+a.dbpassword+"@tcp(127.0.0.1:3306)/"+req.Database); if err !=nil {
+	db, err := sql.Open("mysql", a.dbusername+":"+a.dbpassword+"@tcp(localhost:3306)/"+req.Database); if err !=nil {
 		return err
 	}
 	defer db.Close()
